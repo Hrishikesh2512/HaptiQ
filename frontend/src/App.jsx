@@ -14,7 +14,22 @@ function App() {
   const [alerts, setAlerts] = useState([]);
   const [history, setHistory] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [status, setStatus] = useState('Disconnected');
+  const [threshold, setThreshold] = useState(0.7);
+  const [vibrationEnabled, setVibrationEnabled] = useState(true);
+
+  const getVibrationPattern = (label) => {
+    // Standard patterns
+    const patterns = {
+      'siren': [500, 200, 500, 200, 500], // Urgent
+      'alarm': [1000, 500, 1000], // Long
+      'doorbell': [200, 100, 200], // Double tap
+      'shouting': [300, 100, 300], // Sharp
+      'default': [200] // Single pulse
+    };
+    return patterns[label.toLowerCase()] || patterns['default'];
+  };
   const [analyzer, setAnalyzer] = useState(null);
   const [error, setError] = useState(null);
   
@@ -60,24 +75,23 @@ function App() {
       model.listen(result => {
         const labels = model.wordLabels();
         const scores = result.scores;
-        
-        // Find top prediction
         const topIndex = scores.indexOf(Math.max(...scores));
         const label = labels[topIndex];
         const confidence = scores[topIndex];
 
-        // Filter out background noise
-        if (label !== '_background_noise_' && confidence > 0.6) {
+        // Use the user's sensitivity threshold
+        if (label !== '_background_noise_' && confidence > threshold) {
           addAlert(label, confidence);
-          triggerHaptic();
           
-          // Optional: Sync to backend if connected
+          if (vibrationEnabled) {
+            const pattern = getVibrationPattern(label);
+            navigator.vibrate(pattern);
+          }
+          
           syncToBackend(label, confidence);
         }
       }, {
-        includeSpectrogram: false,
-        probabilityThreshold: 0.7,
-        invokeCallbackOnNoiseAndUnknown: false,
+        probabilityThreshold: 0.5, // Keep low here, filter manually above
         overlapFactor: 0.5
       });
 
@@ -190,11 +204,83 @@ function App() {
             <div className={`w-2 h-2 rounded-full ${status === 'Connected' ? 'bg-secondary animate-pulse' : 'bg-slate-500'}`} />
             {status}
           </div>
-          <button className="p-2 hover:bg-slate-800 rounded-full transition-colors">
+          <button 
+            onClick={() => setShowSettings(true)}
+            className="p-2 hover:bg-slate-800 rounded-full transition-colors"
+          >
             <Settings size={20} />
           </button>
         </div>
       </header>
+
+      {/* Settings Overlay */}
+      <AnimatePresence>
+        {showSettings && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-950/90 backdrop-blur-md z-50 flex items-center justify-center p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl p-8 relative shadow-2xl"
+            >
+              <button 
+                onClick={() => setShowSettings(false)}
+                className="absolute top-6 right-6 p-2 hover:bg-slate-800 rounded-full transition-colors"
+              >
+                <X size={24} />
+              </button>
+              
+              <h2 className="text-2xl font-bold mb-8 flex items-center gap-2">
+                <Settings className="text-primary" />
+                Settings
+              </h2>
+
+              <div className="space-y-8">
+                {/* Sensitivity Slider */}
+                <div>
+                  <div className="flex justify-between mb-2">
+                    <label className="font-semibold text-slate-300">Sensitivity</label>
+                    <span className="text-primary font-mono">{(threshold * 100).toFixed(0)}%</span>
+                  </div>
+                  <input 
+                    type="range" 
+                    min="0.1" 
+                    max="0.95" 
+                    step="0.05"
+                    value={threshold}
+                    onChange={(e) => setThreshold(parseFloat(e.target.value))}
+                    className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-primary"
+                  />
+                  <p className="text-xs text-slate-500 mt-2">
+                    Higher sensitivity means the AI will alert you even for quiet or less certain sounds.
+                  </p>
+                </div>
+
+                {/* Vibration Toggle */}
+                <div className="flex items-center justify-between p-4 bg-slate-800/50 rounded-2xl border border-slate-700">
+                  <div>
+                    <h3 className="font-semibold text-slate-200">Vibration Feedback</h3>
+                    <p className="text-xs text-slate-500 text-balance">Phone will shake for alerts</p>
+                  </div>
+                  <button 
+                    onClick={() => setVibrationEnabled(!vibrationEnabled)}
+                    className={`w-12 h-6 rounded-full relative transition-colors duration-300 ${vibrationEnabled ? 'bg-primary' : 'bg-slate-600'}`}
+                  >
+                    <motion.div 
+                      animate={{ x: vibrationEnabled ? 24 : 4 }}
+                      className="absolute top-1 left-0 w-4 h-4 bg-white rounded-full shadow-md"
+                    />
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Main Control */}
       <main className="w-full max-w-2xl flex-1 flex flex-col items-center">
