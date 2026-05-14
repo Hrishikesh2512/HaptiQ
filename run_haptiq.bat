@@ -6,11 +6,11 @@ echo.
 
 :: 1. Launch Backend
 echo Launching AI Backend...
-start "HaptiQ Backend" cmd /k "cd backend && .\venv\Scripts\python.exe -m uvicorn main:app --reload --port 8000 --host 127.0.0.1"
+start "HaptiQ Backend" cmd /k "cd backend && .\venv\Scripts\python.exe -m uvicorn main:app --reload --port 8000 --host 0.0.0.0"
 
 :: 2. Launch Frontend
 echo Launching React Frontend...
-start "HaptiQ Frontend" cmd /k "cd frontend && set PATH=C:\Program Files\nodejs;%%PATH%% && npm.cmd run dev"
+start "HaptiQ Frontend" cmd /k "cd frontend && set PATH=C:\Program Files\nodejs;%%PATH%% && npm.cmd run dev -- --host"
 
 echo.
 echo ------------------------------------------

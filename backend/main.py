@@ -28,6 +28,13 @@ async def get_history(db: Session = Depends(get_db)):
     alerts = db.query(models.SoundAlert).order_by(models.SoundAlert.timestamp.desc()).limit(50).all()
     return [alert.to_dict() for alert in alerts]
 
+@app.post("/api/log")
+async def log_alert(data: dict, db: Session = Depends(get_db)):
+    alert = models.SoundAlert(label=data['label'], confidence=data['confidence'])
+    db.add(alert)
+    db.commit()
+    return {"status": "success"}
+
 @app.websocket("/ws/audio")
 async def websocket_endpoint(websocket: WebSocket):
     await audio_websocket_handler(websocket)

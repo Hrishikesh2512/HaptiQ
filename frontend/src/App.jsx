@@ -1,12 +1,16 @@
 import { useState, useEffect, useRef } from 'react'
-import { Bell, Mic, MicOff, History, Settings, ShieldAlert, X } from 'lucide-react'
+import { Bell, Mic, MicOff, History, Settings, ShieldAlert, X, Brain } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import Waveform from './components/Waveform'
 import HistoryLog from './components/HistoryLog'
 import axios from 'axios'
+import * as tf from '@tensorflow/tfjs'
+import * as speechCommands from '@tensorflow-models/speech-commands'
 
 function App() {
   const [isListening, setIsListening] = useState(false);
+  const [model, setModel] = useState(null);
+  const [isModelLoading, setIsModelLoading] = useState(true);
   const [alerts, setAlerts] = useState([]);
   const [history, setHistory] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
@@ -20,52 +24,88 @@ function App() {
   const stream = useRef(null);
 
   useEffect(() => {
+    loadModel();
     return () => {
       stopListening();
     };
   }, []);
 
+  const loadModel = async () => {
+    try {
+      setIsModelLoading(true);
+      const recognizer = speechCommands.create("BROWSER_FFT");
+      await recognizer.ensureModelLoaded();
+      setModel(recognizer);
+      setIsModelLoading(false);
+      console.log("On-device AI model loaded.");
+    } catch (err) {
+      console.error("Failed to load AI model:", err);
+      setError("Failed to load on-device AI.");
+      setIsModelLoading(false);
+    }
+  };
+
   const startListening = async () => {
+    if (!model) {
+      setError("AI Model not loaded yet. Please wait.");
+      return;
+    }
+
     try {
       setError(null);
-      // Connect WebSocket
-      ws.current = new WebSocket('ws://127.0.0.1:8000/ws/audio');
-      
-      ws.current.onopen = () => {
-        setStatus('Connected');
-        setIsListening(true);
-        setupAudio().catch(err => {
-          console.error("Audio Setup Error:", err);
-          setError("Microphone access denied or failed.");
-          stopListening();
-        });
-      };
+      setIsListening(true);
+      setStatus('Active (On-Device)');
 
-      ws.current.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.event === 'sound_detected' && data.is_critical) {
-          addAlert(data.label, data.confidence);
+      // Start on-device listening
+      model.listen(result => {
+        const labels = model.wordLabels();
+        const scores = result.scores;
+        
+        // Find top prediction
+        const topIndex = scores.indexOf(Math.max(...scores));
+        const label = labels[topIndex];
+        const confidence = scores[topIndex];
+
+        // Filter out background noise
+        if (label !== '_background_noise_' && confidence > 0.6) {
+          addAlert(label, confidence);
           triggerHaptic();
+          
+          // Optional: Sync to backend if connected
+          syncToBackend(label, confidence);
         }
-      };
+      }, {
+        includeSpectrogram: false,
+        probabilityThreshold: 0.7,
+        invokeCallbackOnNoiseAndUnknown: false,
+        overlapFactor: 0.5
+      });
 
-      ws.current.onclose = () => {
-        setStatus('Disconnected');
-        setIsListening(false);
-      };
-
-      ws.current.onerror = () => {
-        setError("WebSocket connection failed. Is the backend running?");
-        stopListening();
-      };
+      // Setup audio for visualization only
+      setupAudio().catch(err => {
+        console.error("Visualizer Error:", err);
+      });
 
     } catch (err) {
       console.error("Failed to start listening:", err);
-      setError("Failed to connect to the server.");
+      setError("Failed to start AI listening.");
+    }
+  };
+
+  const syncToBackend = async (label, confidence) => {
+    try {
+      await axios.post(`http://${window.location.hostname}:8000/api/log`, {
+        label,
+        confidence
+      });
+    } catch (err) {
+      // Silently fail if backend is off
+      console.log("Backend offline, skipping sync.");
     }
   };
 
   const stopListening = () => {
+    if (model && model.isListening()) model.stopListening();
     if (ws.current) ws.current.close();
     if (processor.current) processor.current.disconnect();
     if (stream.current) stream.current.getTracks().forEach(track => track.stop());
@@ -110,7 +150,7 @@ function App() {
 
   const fetchHistory = async () => {
     try {
-      const response = await axios.get('http://127.0.0.1:8000/api/history');
+      const response = await axios.get(`http://${window.location.hostname}:8000/api/history`);
       setHistory(response.data);
       setShowHistory(true);
     } catch (err) {
@@ -158,6 +198,17 @@ function App() {
 
       {/* Main Control */}
       <main className="w-full max-w-2xl flex-1 flex flex-col items-center">
+        {isModelLoading && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="mb-8 flex items-center gap-2 text-primary bg-primary/10 px-4 py-2 rounded-full border border-primary/20"
+          >
+            <Brain className="animate-pulse" size={20} />
+            <span className="text-sm font-medium">Downloading AI Brain...</span>
+          </motion.div>
+        )}
+
         <div className="relative mb-12">
           <motion.button
             whileHover={{ scale: 1.05 }}
