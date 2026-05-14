@@ -3,6 +3,8 @@ import asyncio
 import numpy as np
 from app.utils.audio_processing import process_audio_chunk
 from app.models.yamnet import get_classifier
+from app.db.database import SessionLocal
+from app.db.models import SoundAlert
 import json
 
 # Sounds we care about for the MVP
@@ -46,6 +48,15 @@ async def audio_websocket_handler(websocket: WebSocket):
                 is_critical = any(sound.lower() in label.lower() for sound in CRITICAL_SOUNDS)
                 
                 if is_critical and confidence > 0.25:
+                    # Save to Database
+                    try:
+                        with SessionLocal() as db:
+                            alert = SoundAlert(label=label, confidence=confidence)
+                            db.add(alert)
+                            db.commit()
+                    except Exception as db_err:
+                        print(f"Database save error: {db_err}")
+
                     await websocket.send_json({
                         "event": "sound_detected",
                         "label": label,

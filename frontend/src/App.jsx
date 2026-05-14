@@ -1,11 +1,15 @@
 import { useState, useEffect, useRef } from 'react'
-import { Bell, Mic, MicOff, History, Settings, ShieldAlert } from 'lucide-react'
+import { Bell, Mic, MicOff, History, Settings, ShieldAlert, X } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import Waveform from './components/Waveform'
+import HistoryLog from './components/HistoryLog'
+import axios from 'axios'
 
 function App() {
   const [isListening, setIsListening] = useState(false);
   const [alerts, setAlerts] = useState([]);
+  const [history, setHistory] = useState([]);
+  const [showHistory, setShowHistory] = useState(false);
   const [status, setStatus] = useState('Disconnected');
   const [analyzer, setAnalyzer] = useState(null);
   const [error, setError] = useState(null);
@@ -104,6 +108,17 @@ function App() {
     processor.current.connect(audioContext.current.destination);
   };
 
+  const fetchHistory = async () => {
+    try {
+      const response = await axios.get('http://127.0.0.1:8000/api/history');
+      setHistory(response.data);
+      setShowHistory(true);
+    } catch (err) {
+      console.error("Failed to fetch history:", err);
+      setError("Could not load history from server.");
+    }
+  };
+
   const addAlert = (label, confidence) => {
     const newAlert = {
       id: Date.now(),
@@ -195,7 +210,10 @@ function App() {
               <Bell size={20} className="text-warning" />
               Active Alerts
             </h2>
-            <button className="text-sm text-primary hover:underline flex items-center gap-1">
+            <button 
+              onClick={fetchHistory}
+              className="text-sm text-primary hover:underline flex items-center gap-1"
+            >
               <History size={14} />
               View History
             </button>
@@ -203,6 +221,7 @@ function App() {
 
           <div className="space-y-3">
             <AnimatePresence mode="popLayout">
+              {/* Existing Alerts */}
               {alerts.length === 0 ? (
                 <motion.div 
                   initial={{ opacity: 0 }}
@@ -234,6 +253,32 @@ function App() {
           </div>
         </div>
       </main>
+
+      {/* History Modal/Overlay */}
+      <AnimatePresence>
+        {showHistory && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-950/90 backdrop-blur-md z-50 flex items-center justify-center p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              className="w-full max-w-2xl bg-slate-900 border border-slate-800 rounded-3xl p-8 relative shadow-2xl"
+            >
+              <button 
+                onClick={() => setShowHistory(false)}
+                className="absolute top-6 right-6 p-2 hover:bg-slate-800 rounded-full transition-colors"
+              >
+                <X size={24} />
+              </button>
+              <HistoryLog history={history} />
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Footer / Tip */}
       <footer className="mt-12 text-center text-slate-500 text-sm max-w-md">
