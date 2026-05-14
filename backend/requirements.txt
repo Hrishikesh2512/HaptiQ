@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+librosa
+tensorflow
+tensorflow-hub
+numpy
+sqlalchemy
+pydantic-settings
+python-multipart
+websockets
