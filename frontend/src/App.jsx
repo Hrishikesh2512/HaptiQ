@@ -163,6 +163,13 @@ export default function App() {
         }
       } else {
         // ── SERVER MODE (HTTP local) ──────────────────────────────────
+        // GUARD: Browsers block ws:// on https:// pages
+        if (location.protocol === 'https:') {
+          setError('⚠️ On-Device AI failed to load. Browser blocks Laptop Brain on HTTPS for security. Try refreshing or use the local IP link.')
+          stopListening()
+          return
+        }
+
         const ws = new WebSocket(WS_URL)
         ws.binaryType = 'arraybuffer'
         wsRef.current = ws
