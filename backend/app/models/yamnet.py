@@ -24,24 +24,40 @@ class SoundClassifier:
 
     def classify(self, audio_np):
         """
-        Classifies audio and returns top predictions.
+        Classifies audio and returns the most specific top prediction.
         audio_np: 1-D float32 numpy array of 16kHz audio.
         """
         scores, embeddings, spectrogram = self.model(audio_np)
-        
+
         # Average scores over all frames
         mean_scores = np.mean(scores, axis=0)
-        top_class_index = np.argmax(mean_scores)
-        
-        prediction = self.class_names[top_class_index]
-        confidence = float(mean_scores[top_class_index])
-        
+        top5_indices = np.argsort(mean_scores)[-5:][::-1]
+
+        # Generic labels that obscure specific sounds — skip them
+        GENERIC = {
+            'Silence', 'Background noise', 'Noise', 'Sound', 'Environmental noise',
+            'Inside, small room', 'Inside, large room or hall',
+            'Outside, urban or manmade', 'Outside, rural or natural',
+            'Music', 'Speech', 'Narration, monologue',
+        }
+
+        # Find the first (highest-scored) non-generic label
+        best_idx = top5_indices[0]
+        for idx in top5_indices:
+            name = self.class_names[idx]
+            if name not in GENERIC:
+                best_idx = idx
+                break
+
+        label = self.class_names[best_idx]
+        confidence = float(mean_scores[best_idx])
+
         return {
-            "label": prediction,
+            "label": label,
             "confidence": confidence,
             "all_predictions": [
                 {"label": self.class_names[i], "confidence": float(mean_scores[i])}
-                for i in np.argsort(mean_scores)[-5:][::-1]
+                for i in top5_indices
             ]
         }
 

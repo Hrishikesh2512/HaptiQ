@@ -1,5 +1,4 @@
-from fastapi import WebSocket
-import asyncio
+from fastapi import WebSocket, WebSocketDisconnect
 import numpy as np
 from app.utils.audio_processing import process_audio_chunk
 from app.models.yamnet import get_classifier
@@ -7,71 +6,87 @@ from app.db.database import SessionLocal
 from app.db.models import SoundAlert
 import json
 
-# Sounds we care about for the MVP
+# All sounds we want to surface — broader than before
 CRITICAL_SOUNDS = {
-    "Alarm", "Siren", "Horn", "Vehicle horn", "Emergency vehicle",
-    "Doorbell", "Baby cry", "Crying", "Dog", "Bark", "Speech"
+    # Emergency
+    "siren", "civil defense siren", "police car (siren)", "ambulance (siren)",
+    "fire engine, fire truck (siren)", "emergency vehicle",
+    # Alerts / alarms
+    "alarm", "fire alarm", "smoke detector", "carbon monoxide detector",
+    "alarm clock", "buzzer", "bell",
+    # Door
+    "doorbell", "door",
+    # People
+    "crying, sobbing", "baby cry, infant cry", "screaming", "shout",
+    "yell", "crowd", "cheering",
+    # Animals
+    "dog", "dog bark", "bark", "howl",
+    # Accidents
+    "glass breaking", "breaking", "crash", "bang", "gunshot",
+    # Vehicles
+    "horn", "car horn, honking", "vehicle horn",
 }
+
+def is_critical(label: str) -> bool:
+    label_lower = label.lower()
+    return any(keyword in label_lower for keyword in CRITICAL_SOUNDS)
+
 
 async def audio_websocket_handler(websocket: WebSocket):
     await websocket.accept()
     classifier = get_classifier()
-    
-    # Buffer to hold audio chunks until we have enough for YAMNet (~1 second)
+
     audio_buffer = np.array([], dtype=np.float32)
-    MIN_SAMPLES = 16000  # 1 second at 16kHz
-    
-    print("WebSocket connection established.")
-    
+    MIN_SAMPLES = 16000   # 1 second at 16kHz
+    STEP_SAMPLES = 8000   # 0.5s stride (50% overlap for smoother detections)
+
+    print("[HaptiQ] Client connected.")
+
     try:
         while True:
             data = await websocket.receive_bytes()
-            if not data: continue
-                
-            # Process current chunk
-            chunk_np = process_audio_chunk(data)
-            audio_buffer = np.append(audio_buffer, chunk_np)
-            
-            # Only classify if we have at least 1 second of audio
+            if not data:
+                continue
+
+            chunk = process_audio_chunk(data)
+            audio_buffer = np.append(audio_buffer, chunk)
+
+            # Run inference every time we have >= 1 second of audio
             if len(audio_buffer) >= MIN_SAMPLES:
-                # Use the last 1 second for inference
                 inference_data = audio_buffer[-MIN_SAMPLES:]
-                results = classifier.classify(inference_data)
-                
-                # Keep a small overlap or clear buffer
-                # Rolling buffer: keep the last 0.5s for continuity
-                audio_buffer = audio_buffer[-8000:] 
-                
-                label = results["label"]
-                confidence = results["confidence"]
-                
-                is_critical = any(sound.lower() in label.lower() for sound in CRITICAL_SOUNDS)
-                
-                if is_critical and confidence > 0.25:
-                    # Save to Database
+                audio_buffer = audio_buffer[-STEP_SAMPLES:]   # keep last 0.5s
+
+                try:
+                    results = classifier.classify(inference_data)
+                except Exception as e:
+                    print(f"[HaptiQ] Classifier error: {e}")
+                    continue
+
+                label = results.get("label", "Unknown")
+                confidence = float(results.get("confidence", 0.0))
+                critical = is_critical(label)
+
+                # Always send result back (frontend uses this for live display)
+                response = {
+                    "event": "sound_detected" if critical else "heartbeat",
+                    "label": label,
+                    "confidence": round(confidence, 4),
+                    "is_critical": critical,
+                }
+
+                await websocket.send_json(response)
+
+                # Persist to DB only for critical detections above threshold
+                if critical and confidence > 0.30:
                     try:
                         with SessionLocal() as db:
                             alert = SoundAlert(label=label, confidence=confidence)
                             db.add(alert)
                             db.commit()
                     except Exception as db_err:
-                        print(f"Database save error: {db_err}")
+                        print(f"[HaptiQ] DB error: {db_err}")
 
-                    await websocket.send_json({
-                        "event": "sound_detected",
-                        "label": label,
-                        "confidence": confidence,
-                        "is_critical": True
-                    })
-                else:
-                    await websocket.send_json({
-                        "event": "heartbeat",
-                        "label": label,
-                        "confidence": confidence,
-                        "is_critical": False
-                    })
-                
+    except WebSocketDisconnect:
+        print("[HaptiQ] Client disconnected.")
     except Exception as e:
-        print(f"WebSocket error: {e}")
-    finally:
-        await websocket.close()
+        print(f"[HaptiQ] Unexpected error: {e}")
