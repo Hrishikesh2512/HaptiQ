@@ -1,11 +1,13 @@
 import * as tf from '@tensorflow/tfjs';
 import { YAMNET_LABELS } from './yamnetLabels';
 
-// YAMNet as a TF.js graph model. The base TFHub path resolves to the model
-// files when `fromTFHub` is set; the GCS path is a direct mirror.
+// YAMNet as a TF.js graph model. Served from our own origin first (no external
+// runtime dependency, no CORS, works offline). The remote handles are only a
+// last-ditch fallback — TFHub now redirects to Kaggle and no longer serves the
+// model directly, so the bundled copy is what actually loads.
 const MODEL_URLS = [
+  { url: `${import.meta.env.BASE_URL}model/model.json`, fromTFHub: false },
   { url: 'https://tfhub.dev/google/tfjs-model/yamnet/tfjs-graph-model/1', fromTFHub: true },
-  { url: 'https://storage.googleapis.com/tfjs-models/savedmodel/yamnet/model.json', fromTFHub: false },
 ];
 
 // Generic labels to skip — return the more specific sound instead
@@ -48,8 +50,13 @@ export class YamnetClassifier {
   predict(audioBuffer) {
     if (!this.model) return null;
     return tf.tidy(() => {
-      const input = tf.tensor1d(audioBuffer).expandDims(0);
-      const [scores] = this.model.predict(input);
+      // YAMNet expects a 1-D waveform tensor (shape [num_samples]).
+      const input = tf.tensor1d(audioBuffer);
+      const out = this.model.predict(input);
+      // The model returns 3 tensors (spectrogram, embeddings, scores) and the
+      // order is not guaranteed — pick the class-scores one by its 521 dim.
+      const outputs = Array.isArray(out) ? out : [out];
+      const scores = outputs.find(t => t.shape[t.shape.length - 1] === 521);
       const meanScores = scores.mean(0);
       const scoresData = meanScores.dataSync();
 
