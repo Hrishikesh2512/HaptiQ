@@ -1,10 +1,9 @@
-from fastapi import FastAPI, WebSocket, Depends
+from fastapi import FastAPI, WebSocket, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.ws_handler import audio_websocket_handler
-from app.db import models, database
+from app.db import models
 from app.db.database import engine, get_db
 from sqlalchemy.orm import Session
-from fastapi import Depends
 
 # Create database tables
 models.Base.metadata.create_all(bind=engine)
@@ -30,7 +29,11 @@ async def get_history(db: Session = Depends(get_db)):
 
 @app.post("/api/log")
 async def log_alert(data: dict, db: Session = Depends(get_db)):
-    alert = models.SoundAlert(label=data['label'], confidence=data['confidence'])
+    label = data.get("label")
+    confidence = data.get("confidence")
+    if label is None or confidence is None:
+        raise HTTPException(status_code=422, detail="label and confidence are required")
+    alert = models.SoundAlert(label=label, confidence=float(confidence))
     db.add(alert)
     db.commit()
     return {"status": "success"}

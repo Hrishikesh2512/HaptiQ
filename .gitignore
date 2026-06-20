@@ -1,9 +1,10 @@
 # Python
 backend/venv/
-backend/__pycache__/
-backend/*.pyc
+__pycache__/
+*.pyc
 backend/.env
 backend/data/*.db
+.pytest_cache/
 
 # Node
 frontend/node_modules/

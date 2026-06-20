@@ -4,32 +4,8 @@ from app.utils.audio_processing import process_audio_chunk
 from app.models.yamnet import get_classifier
 from app.db.database import SessionLocal
 from app.db.models import SoundAlert
-import json
-
-# All sounds we want to surface — broader than before
-CRITICAL_SOUNDS = {
-    # Emergency
-    "siren", "civil defense siren", "police car (siren)", "ambulance (siren)",
-    "fire engine, fire truck (siren)", "emergency vehicle",
-    # Alerts / alarms
-    "alarm", "fire alarm", "smoke detector", "carbon monoxide detector",
-    "alarm clock", "buzzer", "bell",
-    # Door
-    "doorbell", "door",
-    # People
-    "crying, sobbing", "baby cry, infant cry", "screaming", "shout",
-    "yell", "crowd", "cheering",
-    # Animals
-    "dog", "dog bark", "bark", "howl",
-    # Accidents
-    "glass breaking", "breaking", "crash", "bang", "gunshot",
-    # Vehicles
-    "horn", "car horn, honking", "vehicle horn",
-}
-
-def is_critical(label: str) -> bool:
-    label_lower = label.lower()
-    return any(keyword in label_lower for keyword in CRITICAL_SOUNDS)
+from app.core.config import settings
+from app.core.sounds import is_critical
 
 
 async def audio_websocket_handler(websocket: WebSocket):
@@ -77,7 +53,7 @@ async def audio_websocket_handler(websocket: WebSocket):
                 await websocket.send_json(response)
 
                 # Persist to DB only for critical detections above threshold
-                if critical and confidence > 0.30:
+                if critical and confidence > settings.model_threshold:
                     try:
                         with SessionLocal() as db:
                             alert = SoundAlert(label=label, confidence=confidence)

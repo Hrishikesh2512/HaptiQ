@@ -3,30 +3,8 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Mic, MicOff, Settings, X, Clock, Wifi, WifiOff, Zap, Volume2, Brain } from 'lucide-react'
 import Waveform from './components/Waveform'
 import { YamnetClassifier } from './utils/yamnet'
+import { getMeta } from './utils/sounds'
 import axios from 'axios'
-
-const SOUND_META = {
-  siren:    { icon: '🚨', color: '#ef4444', vibrate: [400,150,400,150,400] },
-  alarm:    { icon: '🔔', color: '#f97316', vibrate: [600,200,600] },
-  doorbell: { icon: '🔔', color: '#a855f7', vibrate: [200,100,200] },
-  dog:      { icon: '🐕', color: '#eab308', vibrate: [300,100,100,100,300] },
-  crying:   { icon: '😢', color: '#3b82f6', vibrate: [500,200,300] },
-  shout:    { icon: '📢', color: '#f97316', vibrate: [300,100,300] },
-  glass:    { icon: '🪟', color: '#06b6d4', vibrate: [100,50,100,50,100] },
-  default:  { icon: '🔊', color: '#6366f1', vibrate: [200] },
-}
-
-const getMeta = (label = '') => {
-  const l = label.toLowerCase()
-  if (l.includes('siren') || l.includes('ambulance') || l.includes('police')) return SOUND_META.siren
-  if (l.includes('alarm') || l.includes('smoke') || l.includes('fire')) return SOUND_META.alarm
-  if (l.includes('doorbell') || l.includes('door bell')) return SOUND_META.doorbell
-  if (l.includes('dog') || l.includes('bark')) return SOUND_META.dog
-  if (l.includes('cry') || l.includes('infant') || l.includes('baby')) return SOUND_META.crying
-  if (l.includes('shout') || l.includes('scream') || l.includes('yell')) return SOUND_META.shout
-  if (l.includes('glass') || l.includes('shatter')) return SOUND_META.glass
-  return SOUND_META.default
-}
 
 const BACKEND = `http://${window.location.hostname}:8000`
 const WS_URL  = `ws://${window.location.hostname}:8000/ws/audio`
@@ -46,20 +24,35 @@ export default function App() {
   const [history, setHistory]            = useState([])
   const [threshold, setThreshold]        = useState(0.35)
   const [hapticOn, setHapticOn]          = useState(true)
+  const [flash, setFlash]                = useState(null) // {color} screen flash for new alerts
 
   const classifierRef   = useRef(null)
   const wsRef           = useRef(null)
   const audioCtxRef     = useRef(null)
-  const processorRef    = useRef(null)
+  const workletRef      = useRef(null)
   const streamRef       = useRef(null)
+  const wakeLockRef     = useRef(null)
   const isListeningRef  = useRef(false)
   const thresholdRef    = useRef(threshold)
   const hapticRef       = useRef(hapticOn)
   const audioBuffer     = useRef(new Float32Array(0))
   const labelTimer      = useRef(null)
+  const lastFlashRef    = useRef(0)
 
   useEffect(() => { thresholdRef.current = threshold }, [threshold])
   useEffect(() => { hapticRef.current = hapticOn }, [hapticOn])
+
+  // The OS drops the screen wake lock when the tab is hidden; re-acquire it
+  // when the user returns while still listening.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && isListeningRef.current && !wakeLockRef.current) {
+        acquireWakeLock()
+      }
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [])
 
   // Load YAMNet on mount (works on HTTPS, skipped on HTTP)
   useEffect(() => {
@@ -75,6 +68,11 @@ export default function App() {
       } catch (e) {
         console.warn('On-device AI failed:', e.message)
         setMode('idle')
+        // On HTTPS there is no server fallback, so surface the failure instead
+        // of leaving the user with a button that silently does nothing.
+        if (location.protocol === 'https:') {
+          setError('On-device AI could not be loaded (check your connection and refresh). Sound detection is unavailable until it loads.')
+        }
       }
     })()
   }, [])
@@ -83,9 +81,29 @@ export default function App() {
     const meta = getMeta(label)
     setAlerts(prev => [{ id: Date.now(), label, confidence, meta, time: new Date() }, ...prev].slice(0, 20))
     if (hapticRef.current && navigator.vibrate) navigator.vibrate(meta.vibrate)
+    // Visual equivalent of the haptic pulse — a deaf user must not miss a
+    // detection. Skip for users who prefer reduced motion, and rate-limit to a
+    // single non-repeating flash at most every 1.2s (well under the WCAG 2.3.1
+    // three-flashes-per-second photosensitivity threshold).
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    const now = Date.now()
+    if (!reduceMotion && now - lastFlashRef.current > 1200) {
+      lastFlashRef.current = now
+      setFlash({ color: meta.color, id: now })
+    }
     clearTimeout(labelTimer.current)
     labelTimer.current = setTimeout(() => setLiveLabel(null), 4000)
   }, [])
+
+  const acquireWakeLock = async () => {
+    try {
+      const wl = await navigator.wakeLock?.request('screen')
+      if (wl) {
+        wl.addEventListener('release', () => { wakeLockRef.current = null })
+        wakeLockRef.current = wl
+      }
+    } catch { /* unsupported or denied */ }
+  }
 
   const stopListening = useCallback(() => {
     isListeningRef.current = false
@@ -94,9 +112,11 @@ export default function App() {
     setLiveLabel(null)
     setAudioLevel(0)
     wsRef.current?.close()
-    processorRef.current?.disconnect()
+    if (workletRef.current) { workletRef.current.port.onmessage = null; workletRef.current.disconnect() }
     streamRef.current?.getTracks().forEach(t => t.stop())
     if (audioCtxRef.current?.state !== 'closed') audioCtxRef.current?.close()
+    wakeLockRef.current?.release().catch(() => {})
+    wakeLockRef.current = null
     setAnalyzer(null)
     audioBuffer.current = new Float32Array(0)
   }, [])
@@ -105,20 +125,32 @@ export default function App() {
     streamRef.current = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: false, noiseSuppression: false, sampleRate: 16000 }
     })
-    audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 })
-    if (audioCtxRef.current.state === 'suspended') await audioCtxRef.current.resume()
+    const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 })
+    audioCtxRef.current = ctx
+    if (ctx.state === 'suspended') await ctx.resume()
 
-    const source  = audioCtxRef.current.createMediaStreamSource(streamRef.current)
-    const analyser = audioCtxRef.current.createAnalyser()
+    const source  = ctx.createMediaStreamSource(streamRef.current)
+    const analyser = ctx.createAnalyser()
     analyser.fftSize = 256
     analyser.smoothingTimeConstant = 0.8
     source.connect(analyser)
     setAnalyzer(analyser)
 
-    processorRef.current = audioCtxRef.current.createScriptProcessor(4096, 1, 1)
-    analyser.connect(processorRef.current)
-    processorRef.current.connect(audioCtxRef.current.destination)
-    return processorRef.current
+    // AudioWorklet captures + resamples to 16 kHz off the main thread.
+    // BASE_URL keeps this correct under the GitHub Pages sub-path.
+    await ctx.audioWorklet.addModule(`${import.meta.env.BASE_URL}audio-capture-worklet.js`)
+    const node = new AudioWorkletNode(ctx, 'capture-processor', {
+      numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1,
+      processorOptions: { targetRate: 16000 },
+    })
+    source.connect(node)
+    node.connect(ctx.destination) // keeps the node pulling; it emits no audio
+    workletRef.current = node
+
+    // Keep the screen awake while listening so detection isn't suspended.
+    await acquireWakeLock()
+
+    return node
   }
 
   const startListening = async () => {
@@ -129,30 +161,43 @@ export default function App() {
       return
     }
 
+    // On HTTPS there is no ws:// fallback, so a missing classifier is a dead end.
+    if (location.protocol === 'https:' && !classifierRef.current) {
+      setError('On-device AI is still loading or failed to load. Please wait a moment or refresh.')
+      return
+    }
+
     try {
-      const processor = await setupAudioEngine()
+      const node = await setupAudioEngine()
       isListeningRef.current = true
       setIsListening(true)
+
+      // Compute the on-screen level meter from a 16 kHz frame.
+      const levelOf = (frame) => {
+        let s = 0; for (let i = 0; i < frame.length; i++) s += frame[i] * frame[i]
+        return Math.sqrt(s / frame.length)
+      }
 
       const useOnDevice = !!classifierRef.current
       setMode(useOnDevice ? 'ondevice' : 'server')
 
       if (useOnDevice) {
         // ── ON-DEVICE MODE (HTTPS / Vercel) ──────────────────────────
+        const WINDOW = 15600 // ~0.975s, YAMNet's expected input length
+        const HOP    = 8000  // advance ~0.5s between inferences
         audioBuffer.current = new Float32Array(0)
-        processor.onaudioprocess = async (e) => {
+        node.port.onmessage = (e) => {
           if (!isListeningRef.current) return
-          const raw = e.inputBuffer.getChannelData(0)
-          let s = 0; for (let i = 0; i < raw.length; i++) s += raw[i] * raw[i]
-          setAudioLevel(Math.sqrt(s / raw.length))
+          const frame = e.data // Float32Array @ 16 kHz
+          setAudioLevel(levelOf(frame))
 
-          const nb = new Float32Array(audioBuffer.current.length + raw.length)
-          nb.set(audioBuffer.current); nb.set(raw, audioBuffer.current.length)
+          const nb = new Float32Array(audioBuffer.current.length + frame.length)
+          nb.set(audioBuffer.current); nb.set(frame, audioBuffer.current.length)
           audioBuffer.current = nb
 
-          if (audioBuffer.current.length >= 15600) {
-            const buf = audioBuffer.current.slice(0, 15600)
-            audioBuffer.current = audioBuffer.current.slice(4096)
+          if (audioBuffer.current.length >= WINDOW) {
+            const buf = audioBuffer.current.slice(0, WINDOW)
+            audioBuffer.current = audioBuffer.current.slice(HOP)
             const result = classifierRef.current?.predict(buf)
             if (result) {
               setLiveLabel(result.label)
@@ -163,25 +208,17 @@ export default function App() {
         }
       } else {
         // ── SERVER MODE (HTTP local) ──────────────────────────────────
-        // GUARD: Browsers block ws:// on https:// pages
-        if (location.protocol === 'https:') {
-          setError('⚠️ On-Device AI failed to load. Browser blocks Laptop Brain on HTTPS for security. Try refreshing or use the local IP link.')
-          stopListening()
-          return
-        }
-
         const ws = new WebSocket(WS_URL)
         ws.binaryType = 'arraybuffer'
         wsRef.current = ws
 
-        processor.onaudioprocess = (e) => {
+        node.port.onmessage = (e) => {
           if (!isListeningRef.current) return
-          const raw = e.inputBuffer.getChannelData(0)
-          let s = 0; for (let i = 0; i < raw.length; i++) s += raw[i] * raw[i]
-          setAudioLevel(Math.sqrt(s / raw.length))
+          const frame = e.data // Float32Array @ 16 kHz
+          setAudioLevel(levelOf(frame))
           if (ws.readyState !== WebSocket.OPEN) return
-          const pcm = new Int16Array(raw.length)
-          for (let i = 0; i < raw.length; i++) pcm[i] = Math.max(-32768, Math.min(32767, raw[i] * 32768))
+          const pcm = new Int16Array(frame.length)
+          for (let i = 0; i < frame.length; i++) pcm[i] = Math.max(-32768, Math.min(32767, frame[i] * 32768))
           ws.send(pcm.buffer)
         }
 
@@ -214,9 +251,26 @@ export default function App() {
   const liveMeta = liveLabel ? getMeta(liveLabel) : null
   const volPct   = Math.min(100, audioLevel * 800)
   const modeLabel = { idle: '', loading: 'Loading AI…', ondevice: 'On-Device AI', server: 'Laptop AI' }
+  const hapticSupported = typeof navigator !== 'undefined' && 'vibrate' in navigator
 
   return (
     <div className="min-h-screen bg-[#080c14] text-white flex flex-col" style={{ minHeight: '100dvh' }}>
+
+      {/* Full-screen flash on a new detection — visual counterpart to vibration */}
+      <AnimatePresence>
+        {flash && (
+          <motion.div
+            key={flash.id}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: [0, 0.55, 0] }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.7, times: [0, 0.2, 1] }}
+            onAnimationComplete={() => setFlash(null)}
+            className="fixed inset-0 z-[60] pointer-events-none"
+            style={{ background: flash.color }}
+          />
+        )}
+      </AnimatePresence>
 
       {/* Header */}
       <header className="flex items-center justify-between px-5 pt-6 pb-3">
@@ -357,6 +411,13 @@ export default function App() {
             </AnimatePresence>
           </div>
         </div>
+
+        {/* Safety disclaimer — this is an aid, not a certified alerting device */}
+        <p className="text-[10px] leading-relaxed text-white/25 text-center px-4 mt-2">
+          ⚠️ HaptiQ is an experimental assistant and can miss or misidentify sounds.
+          Do not rely on it as your only alert for emergencies — keep using certified
+          smoke/CO alarms and assistive alerting devices.
+        </p>
       </main>
 
       {/* Settings bottom sheet */}
@@ -381,16 +442,23 @@ export default function App() {
                 <div className="flex justify-between text-[10px] text-white/20 mt-1"><span>More sensitive</span><span>Strict</span></div>
               </div>
               <div className="flex items-center justify-between">
-                <div><p className="font-medium text-[14px]">Vibration Feedback</p><p className="text-[11px] text-white/40 mt-0.5">Different patterns per sound</p></div>
-                <button onClick={() => setHapticOn(!hapticOn)}
-                  className={`relative w-12 h-7 rounded-full transition-colors ${hapticOn ? 'bg-indigo-500' : 'bg-white/10'}`}>
-                  <motion.div animate={{ x: hapticOn ? 22 : 4 }} className="absolute top-1.5 w-4 h-4 bg-white rounded-full shadow-sm" />
+                <div>
+                  <p className="font-medium text-[14px]">Vibration Feedback</p>
+                  <p className="text-[11px] text-white/40 mt-0.5">
+                    {hapticSupported ? 'Different patterns per sound' : 'Not supported on this device (e.g. iPhone) — the screen flash is used instead'}
+                  </p>
+                </div>
+                <button onClick={() => setHapticOn(!hapticOn)} disabled={!hapticSupported}
+                  className={`relative w-12 h-7 rounded-full transition-colors disabled:opacity-40 ${hapticOn && hapticSupported ? 'bg-indigo-500' : 'bg-white/10'}`}>
+                  <motion.div animate={{ x: hapticOn && hapticSupported ? 22 : 4 }} className="absolute top-1.5 w-4 h-4 bg-white rounded-full shadow-sm" />
                 </button>
               </div>
-              <button onClick={() => navigator.vibrate?.([200, 100, 200, 100, 400])}
-                className="w-full py-3 rounded-2xl glass text-[14px] font-medium text-indigo-400 border border-indigo-500/20">
-                <Zap size={14} className="inline mr-2" />Test Vibration
-              </button>
+              {hapticSupported && (
+                <button onClick={() => navigator.vibrate?.([200, 100, 200, 100, 400])}
+                  className="w-full py-3 rounded-2xl glass text-[14px] font-medium text-indigo-400 border border-indigo-500/20">
+                  <Zap size={14} className="inline mr-2" />Test Vibration
+                </button>
+              )}
             </motion.div>
           </motion.div>
         )}

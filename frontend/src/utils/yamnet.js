@@ -1,10 +1,12 @@
 import * as tf from '@tensorflow/tfjs';
+import { YAMNET_LABELS } from './yamnetLabels';
 
-// TFHub works fine on HTTPS (Vercel). Only blocked on HTTP local dev.
-const MODEL_URL = 'https://tfhub.dev/google/tfjs-model/yamnet/tfjs-graph-model/1/default/1/model.json';
-
-// Fallback: a smaller mirror
-const FALLBACK_URL = 'https://storage.googleapis.com/tfjs-models/tfjs/yamnet/1/default/1/model.json';
+// YAMNet as a TF.js graph model. The base TFHub path resolves to the model
+// files when `fromTFHub` is set; the GCS path is a direct mirror.
+const MODEL_URLS = [
+  { url: 'https://tfhub.dev/google/tfjs-model/yamnet/tfjs-graph-model/1', fromTFHub: true },
+  { url: 'https://storage.googleapis.com/tfjs-models/savedmodel/yamnet/model.json', fromTFHub: false },
+];
 
 // Generic labels to skip — return the more specific sound instead
 const GENERIC = new Set([
@@ -17,50 +19,30 @@ const GENERIC = new Set([
 export class YamnetClassifier {
   constructor() {
     this.model = null;
-    this.labels = [];
+    // Labels are bundled (no runtime network dependency) so a detection can
+    // never come back as a meaningless "Sound 137".
+    this.labels = YAMNET_LABELS;
   }
 
   async load(onProgress) {
     await tf.ready();
     onProgress?.('Loading AI model…');
 
-    // Try primary URL first, then fallback
-    const urls = [MODEL_URL, FALLBACK_URL];
     let lastErr;
-    for (const url of urls) {
+    for (const { url, fromTFHub } of MODEL_URLS) {
       try {
-        this.model = await tf.loadGraphModel(url, { fromTFHub: url.includes('tfhub.dev') });
+        this.model = await tf.loadGraphModel(url, { fromTFHub });
         break;
       } catch (e) {
         lastErr = e;
-        console.warn(`[YAMNet] Failed ${url}:`, e.message);
+        console.warn(`[YAMNet] Failed to load ${url}:`, e.message);
       }
     }
-    if (!this.model) throw new Error(lastErr?.message || 'Model load failed');
-
-    onProgress?.('Loading sound labels…');
-    this.labels = await this._fetchLabels();
-    onProgress?.('AI ready');
-  }
-
-  async _fetchLabels() {
-    try {
-      const r = await fetch(
-        'https://raw.githubusercontent.com/tensorflow/models/master/research/audioset/yamnet/yamnet_class_map.csv'
-      );
-      const csv = await r.text();
-      return csv
-        .split('\n')
-        .filter(l => l.trim())
-        .slice(1)
-        .map(l => {
-          const parts = l.split(',');
-          return parts[2]?.replace(/"/g, '').trim() || 'Sound';
-        });
-    } catch {
-      // Fallback: return 521 generic labels
-      return Array.from({ length: 521 }, (_, i) => `Sound ${i}`);
+    if (!this.model) {
+      throw new Error(`Could not load the sound model. ${lastErr?.message || ''}`.trim());
     }
+
+    onProgress?.('AI ready');
   }
 
   predict(audioBuffer) {
