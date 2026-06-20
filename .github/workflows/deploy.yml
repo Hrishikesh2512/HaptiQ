@@ -37,7 +37,9 @@ jobs:
         with:
           enablement: true # turn Pages on automatically (no manual settings step)
 
-      - run: npm ci
+      # npm install (not ci): a Windows-generated lockfile can omit the Linux
+      # rollup/esbuild optional binaries that `npm ci` requires verbatim.
+      - run: npm install --no-audit --no-fund
 
       - run: npm run build
 
