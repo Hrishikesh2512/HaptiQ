@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Mic, MicOff, Settings, X, Clock, Wifi, WifiOff, Zap, Volume2, Brain } from 'lucide-react'
 import Waveform from './components/Waveform'
 import { YamnetClassifier } from './utils/yamnet'
-import { getMeta } from './utils/sounds'
+import { getMeta, isCritical } from './utils/sounds'
 import axios from 'axios'
 
 const BACKEND = `http://${window.location.hostname}:8000`
@@ -202,7 +202,10 @@ export default function App() {
             if (result) {
               setLiveLabel(result.label)
               setLiveConf(result.confidence)
-              if (result.confidence >= thresholdRef.current) addAlert(result.label, result.confidence)
+              // Only alert (vibrate/flash) on critical sounds above threshold —
+              // matches the server path's is_critical gate so everyday sounds
+              // like speech or music don't buzz the device.
+              if (isCritical(result.label) && result.confidence >= thresholdRef.current) addAlert(result.label, result.confidence)
             }
           }
         }

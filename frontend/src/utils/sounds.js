@@ -24,3 +24,10 @@ export const getMeta = (label = '') => {
   if (l.includes('glass') || l.includes('shatter')) return SOUND_META.glass
   return SOUND_META.default
 }
+
+// A detection is only worth a vibration/flash/alert if it maps to one of the
+// specific buckets above. Anything that falls through to `default` is an
+// everyday sound (speech, music, typing…) we deliberately stay quiet for — this
+// mirrors the backend's is_critical() gate so on-device mode doesn't buzz on
+// every sound.
+export const isCritical = (label = '') => getMeta(label) !== SOUND_META.default
